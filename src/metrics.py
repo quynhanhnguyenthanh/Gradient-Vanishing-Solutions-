@@ -1,6 +1,6 @@
 """Hệ chỉ số đo Gradient Vanishing.
 
-Nguyên tắc (theo góp ý TA):
+Nguyên tắc:
   - Đại lượng chính là ‖∇W‖/‖W‖ vì nó tự chuẩn hóa theo quy mô layer.
   - decay_slope chỉ tính trên các layer cùng độ rộng, bỏ layer1 (784->w).
   - effective_depth báo cáo NHIỀU ngưỡng, không dựa vào một ngưỡng duy nhất.
