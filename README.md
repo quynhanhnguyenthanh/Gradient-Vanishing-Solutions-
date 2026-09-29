@@ -32,7 +32,7 @@ Mỗi giải pháp đại diện một cơ chế khác nhau:
 
 ## Hệ chỉ số
 
-Đại lượng chính là **`‖∇W‖/‖W‖`** cho từng layer, không phải gradient norm thô — vì layer đầu nhận input 784 chiều nên có nhiều tham số hơn hẳn các hidden layer 128→128, so trực tiếp là so sai.
+Đại lượng chính là **`‖∇W‖/‖W‖`** cho từng layer, không phải gradient norm thô - vì layer đầu nhận input 784 chiều nên có nhiều tham số hơn hẳn các hidden layer 128→128, so trực tiếp là so sai.
 
 | Chỉ số | Cho biết |
 |---|---|
@@ -49,9 +49,9 @@ Mỗi giải pháp đại diện một cơ chế khác nhau:
 
 ## Giao thức thí nghiệm
 
-**Learning rate** — không dùng chung một giá trị (thang lr của SGD và Adam khác hẳn nhau), cũng không tune tùy ý. Mỗi cấu hình thử **cùng một lưới 4 giá trị** theo thang log, chọn giá trị tốt nhất trên validation, rồi chạy 3 seed tại giá trị đó.
+**Learning rate** - không dùng chung một giá trị (thang lr của SGD và Adam khác hẳn nhau), cũng không tune tùy ý. Mỗi cấu hình thử **cùng một lưới 4 giá trị** theo thang log, chọn giá trị tốt nhất trên validation, rồi chạy 3 seed tại giá trị đó.
 
-**Seed** — 3 seed cho mọi cấu hình, **dùng chung một bộ seed** để so sánh trên cùng điều kiện khởi tạo. Chỉ kết luận một cấu hình tốt hơn khi chênh lệch lớn hơn rõ rệt so với std; nếu nằm trong khoảng std thì ghi "chưa phân biệt được".
+**Seed** - 3 seed cho mọi cấu hình, **dùng chung một bộ seed** để so sánh trên cùng điều kiện khởi tạo. Chỉ kết luận một cấu hình tốt hơn khi chênh lệch lớn hơn rõ rệt so với std; nếu nằm trong khoảng std thì ghi "chưa phân biệt được".
 
 **Ba pha**
 
@@ -102,13 +102,13 @@ import sys; sys.path.append('src')
 
 ## Tiến độ
 
-- [x] Tái hiện baseline tutorial — train loss 2.3037 (≈ ln 10 = 2.3026), test acc 0.10
+- [x] Tái hiện baseline tutorial - train loss 2.3037 (≈ ln 10 = 2.3026), test acc 0.10
 - [x] Tái hiện gradient flow và heatmap layer × epoch
 - [ ] Tối ưu pipeline (1003s → mục tiêu <60s mỗi run)
 - [ ] `metrics.py` đầy đủ
-- [ ] Pha 1 — ablation
-- [ ] Pha 2 — depth scaling
-- [ ] Pha 3 — leave-one-out
+- [ ] Pha 1 - ablation
+- [ ] Pha 2 - depth scaling
+- [ ] Pha 3 - leave-one-out
 
 ---
 
