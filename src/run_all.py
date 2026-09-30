@@ -109,9 +109,14 @@ def tune_lr(cfg, tune_epochs=20):
 # ----------------------------------------------------------------------
 def load_done():
     """Trả tập (name, seed) đã chạy xong, để resume."""
-    if not os.path.exists(SUMMARY):
+    if not os.path.exists(SUMMARY) or os.path.getsize(SUMMARY) == 0:
         return set()
-    df = pd.read_csv(SUMMARY)
+    try:
+        df = pd.read_csv(SUMMARY)
+    except pd.errors.EmptyDataError:
+        return set()
+    if 'name' not in df.columns or 'seed' not in df.columns:
+        return set()
     return set(zip(df['name'], df['seed']))
 
 
