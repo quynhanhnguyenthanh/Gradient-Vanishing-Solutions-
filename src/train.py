@@ -11,7 +11,7 @@ from torchvision.datasets import FashionMNIST
 
 from model import build_mlp
 from metrics import (grad_ratio_per_layer, grad_abs_mean_per_layer,
-                     decay_slope, effective_depth,
+                     decay_slope, relative_gradient, effective_depth,
                      snapshot_weights, update_ratio_per_layer,
                      ActivationRecorder, saturation_rate, dead_relu_rate)
 
@@ -78,6 +78,7 @@ def measure_at_init(model, X, y, criterion, bs):
         'grad_ratio': ratios,
         'grad_abs': grad_abs_mean_per_layer(model),
         'decay_slope': decay_slope(ratios, model),
+        'relative_gradient': relative_gradient(ratios, model),
         'effective_depth': effective_depth(ratios),
         'saturation': saturation_rate(rec.store),
         'dead_relu': dead_relu_rate(rec.store),
