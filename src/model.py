@@ -34,14 +34,11 @@ class Block(nn.Module):
     def __init__(self, in_dim, out_dim, activation, norm):
         super().__init__()
         self.lin = nn.Linear(in_dim, out_dim)
-        self.norm = nn.BatchNorm1d(out_dim) if norm == 'batchnorm' else None
+        self.norm = nn.BatchNorm1d(out_dim) if norm == 'batchnorm' else nn.Identity()
         self.act = make_activation(activation)
 
     def forward(self, x):
-        x = self.lin(x)
-        if self.norm is not None:
-            x = self.norm(x)
-        return self.act(x)
+        return self.act(self.norm(self.lin(x)))
 
 
 class MLP(nn.Module):
