@@ -47,6 +47,14 @@ def decay_slope(ratios, model):
     # trục x: 0 = layer nông nhất trong nhóm, tăng dần về output
     return float(np.polyfit(np.arange(len(logv)), logv, 1)[0])
 
+def relative_gradient(ratios, model):
+    """Tỉ số gradient giữa layer liền kề. Cho biết mỗi layer làm
+    gradient co lại bao nhiêu lần."""
+    names = [n for n, _ in model.weight_layers()]
+    out = {}
+    for a, b in zip(names[:-1], names[1:]):
+        out[f'{a}->{b}'] = ratios[a] / (ratios[b] + 1e-12)
+    return out
 
 def effective_depth(ratios, thresholds=THRESHOLDS):
     """Số layer có ratio > threshold * ratio(output). Trả dict theo ngưỡng."""
