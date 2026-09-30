@@ -84,22 +84,22 @@ def phase3_configs():
 # Tune learning rate: cùng ngân sách cho mọi cấu hình
 # ----------------------------------------------------------------------
 def tune_lr(cfg, tune_epochs=20):
-    """Thử cùng một lưới 4 giá trị, chọn theo val_acc, dùng 1 seed.
-
-    Không cố định lr chung vì thang lr của SGD và Adam khác hẳn nhau.
-    Không tune tùy ý vì cấu hình được tune kỹ hơn sẽ có lợi thế.
-    """
     grid = LR_GRID[cfg.optimizer]
-    best_lr, best_acc = grid[0], -1.0
+    best_lr, best_acc, sweep = grid[0], -1.0, []
 
     for lr in grid:
         trial = replace(cfg, lr=lr, epochs=tune_epochs,
                         patience=tune_epochs, seed=SEEDS[0])
         res, _, _ = run_experiment(trial, verbose=False)
         print(f"    lr={lr:<8g} val_acc={res['val_acc']:.4f}")
+        sweep.append({'name': cfg.name, 'lr': lr, 'val_acc': res['val_acc']})
         if res['val_acc'] > best_acc:
             best_lr, best_acc = lr, res['val_acc']
 
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    path = os.path.join(RESULTS_DIR, 'lr_sweep.csv')
+    pd.DataFrame(sweep).to_csv(path, mode='a',
+                               header=not os.path.exists(path), index=False)
     print(f"    -> chọn lr={best_lr:g}")
     return best_lr
 
