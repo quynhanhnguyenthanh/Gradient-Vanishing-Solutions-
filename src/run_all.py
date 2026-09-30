@@ -135,6 +135,8 @@ def save_raw(cfg, hist, init):
             'final_update_ratio': hist['update_ratio'][-1],
             'val_acc_curve': hist['val_acc'],
             'train_loss_curve': hist['train_loss'],
+            'grad_ratio_history': hist['grad_ratio'],
+            'update_ratio_history': hist['update_ratio'],
         }, f)
 
 
