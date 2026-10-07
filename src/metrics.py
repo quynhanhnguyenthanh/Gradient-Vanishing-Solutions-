@@ -1,10 +1,11 @@
 """Hệ chỉ số đo Gradient Vanishing.
 
-Nguyên tắc:
+Nguyên tắc (theo góp ý TA):
   - Đại lượng chính là ‖∇W‖/‖W‖ vì nó tự chuẩn hóa theo quy mô layer.
   - decay_slope chỉ tính trên các layer cùng độ rộng, bỏ layer1 (784->w).
   - effective_depth báo cáo NHIỀU ngưỡng, không dựa vào một ngưỡng duy nhất.
   - Không kết luận từ một chỉ số: luôn báo cáo song song nhiều chỉ số.
+  - Phân biệt sparsity (output=0 mỗi mẫu) với dead-ReLU (neuron=0 mọi mẫu).
 """
 
 import numpy as np
@@ -27,10 +28,24 @@ def grad_ratio_per_layer(model):
 
 
 def grad_abs_mean_per_layer(model):
-    """Trung bình |∇W| - đại lượng tutorial dùng, giữ để đối chiếu Hình 13/14."""
+    """Trung bình |∇W| - đại lượng tutorial dùng, giữ để đối chiếu."""
     return {name: lin.weight.grad.abs().mean().item()
             for name, lin in model.weight_layers()
             if lin.weight.grad is not None}
+
+
+def decay_slope(ratios, model):
+    """Độ dốc hồi quy của log10(ratio) theo chỉ số layer.
+
+    Chỉ dùng các layer w->w để loại ảnh hưởng của layer1 (784->w).
+    Gần 0 = gradient được bảo toàn. Dương lớn = suy giảm nhanh về phía input.
+    """
+    names = [n for n, _ in model.same_width_layers()] + ['output']
+    vals = [ratios[n] for n in names if n in ratios]
+    if len(vals) < 3:
+        return float('nan')
+    logv = np.log10(np.array(vals) + 1e-12)
+    return float(np.polyfit(np.arange(len(logv)), logv, 1)[0])
 
 
 def decay_slope_with_r2(ratios, model):
@@ -50,23 +65,15 @@ def decay_slope_with_r2(ratios, model):
     return float(slope), float(r2)
 
 
-def weight_drift(model, w0):
-    """‖W_t − W_0‖/‖W_0‖ từng layer. Layer nào thực sự đã dịch chuyển
-    khỏi điểm khởi tạo. Phân biệt 'vanishing ổn định' với 'không học gì'."""
-    out = {}
-    for name, lin in model.weight_layers():
-        out[name] = ((lin.weight.detach() - w0[name]).norm()
-                     / (w0[name].norm() + 1e-12)).item()
-    return out
-
 def relative_gradient(ratios, model):
-    """Tỉ số gradient giữa layer liền kề. Cho biết mỗi layer làm
-    gradient co lại bao nhiêu lần."""
+    """Tỉ số gradient giữa hai layer liền kề, theo chiều backward.
+    Giá trị ~8 nghĩa là gradient co 8 lần khi truyền ngược qua layer đó."""
     names = [n for n, _ in model.weight_layers()]
     out = {}
     for a, b in zip(names[:-1], names[1:]):
-        out[f'{a}->{b}'] = ratios[a] / (ratios[b] + 1e-12)
+        out[f'{b}->{a}'] = ratios[b] / (ratios[a] + 1e-12)
     return out
+
 
 def effective_depth(ratios, thresholds=THRESHOLDS):
     """Số layer có ratio > threshold * ratio(output). Trả dict theo ngưỡng."""
@@ -78,7 +85,7 @@ def effective_depth(ratios, thresholds=THRESHOLDS):
 
 
 # ----------------------------------------------------------------------
-# Mức cập nhật thực tế  
+# Mức cập nhật thực tế  (quan trọng nhất khi phân tích Adam)
 # ----------------------------------------------------------------------
 def snapshot_weights(model):
     return {name: lin.weight.detach().clone()
@@ -86,7 +93,7 @@ def snapshot_weights(model):
 
 
 def update_ratio_per_layer(model, snapshot):
-    """‖ΔW‖/‖W‖ sau một bước. Cho biết layer nào THỰC SỰ đang học.
+    """‖ΔW‖/‖W‖ sau MỘT bước. Layer nào thực sự đang được cập nhật.
 
     Gradient nhỏ mà update_ratio vẫn lớn -> optimizer đang bù mức cập nhật.
     """
@@ -98,8 +105,22 @@ def update_ratio_per_layer(model, snapshot):
     return out
 
 
+def weight_drift(model, w0):
+    """‖W_t − W_0‖/‖W_0‖ từng layer: tích lũy từ điểm khởi tạo.
+
+    Phân biệt hai cách giải thích khi slope không đổi:
+      drift đáng kể mọi layer -> vanishing là trạng thái ổn định
+      drift ~ 0 ở layer đầu   -> model gần như không học gì
+    """
+    out = {}
+    for name, lin in model.weight_layers():
+        out[name] = ((lin.weight.detach() - w0[name]).norm()
+                     / (w0[name].norm() + 1e-12)).item()
+    return out
+
+
 # ----------------------------------------------------------------------
-# Giải thích nguyên nhân: bão hòa và neuron chết
+# Giải thích nguyên nhân: bão hòa, tính thưa, neuron chết
 # ----------------------------------------------------------------------
 class ActivationRecorder:
     """Ghi output của các hàm kích hoạt qua forward hook."""
@@ -127,24 +148,27 @@ class ActivationRecorder:
 
 def saturation_rate(acts, threshold=0.01):
     """Tỉ lệ neuron sigmoid bão hòa: đạo hàm σ(1-σ) < threshold.
-
-    Ngưỡng 0.01 ứng với σ ngoài khoảng ~[0.01, 0.99].
-    """
+    Ngưỡng 0.01 ứng với σ ngoài khoảng ~[0.01, 0.99]."""
     out = {}
     for name, a in acts.items():
         deriv = a * (1 - a)
         out[name] = (deriv < threshold).float().mean().item()
     return out
 
+
 def sparsity_rate(acts):
-    """Tỉ lệ output bằng 0, tính trên mỗi mẫu. Tính thưa có ích."""
-    return {n: (a == 0).float().mean().item() for n, a in acts.items()}
+    """Tỉ lệ output bằng 0, tính trên MỖI MẪU. Đây là tính thưa, có ích."""
+    return {name: (a == 0).float().mean().item() for name, a in acts.items()}
 
 
 def dead_relu_rate(acts):
-    """Tỉ lệ NEURON không kích hoạt với BẤT KỲ mẫu nào. Neuron chết thật."""
+    """Tỉ lệ NEURON không kích hoạt với BẤT KỲ mẫu nào. Neuron chết thật.
+
+    Khác sparsity: sparsity cao vẫn có thể là tốt (biểu diễn thưa),
+    còn dead-ReLU cao là mất hẳn capacity.
+    """
     out = {}
-    for n, a in acts.items():
+    for name, a in acts.items():
         never_active = (a.abs().sum(dim=0) == 0)   # cộng theo chiều batch
-        out[n] = never_active.float().mean().item()
+        out[name] = never_active.float().mean().item()
     return out
