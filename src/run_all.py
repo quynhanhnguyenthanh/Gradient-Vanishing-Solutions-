@@ -143,17 +143,26 @@ def save_raw(cfg, hist, init):
     path = os.path.join(RAW_DIR, f'{cfg.name}_s{cfg.seed}.json')
     data = {
         'config': cfg.to_dict(),
+        # cơ chế: activation gradient (theo hướng dẫn TA)
+        'init_act_grad_rms': init.get('act_grad_rms'),
+        'init_act_grad_relative': init.get('act_grad_relative'),
+        'act_grad_history': hist.get('act_grad'),
+        # hệ quả: weight gradient
         'init_grad_ratio': init['grad_ratio'],
-        'init_saturation': init.get('saturation'),
-        'init_sparsity': init.get('sparsity'),
-        'init_dead_relu': init.get('dead_relu'),
+        'init_grad_rms': init.get('grad_rms'),
+        'init_eff_update': init.get('eff_update'),
         'init_relative_gradient': init.get('relative_gradient'),
         'final_grad_ratio': hist['grad_ratio'][-1],
         'final_update_ratio': hist['update_ratio'][-1],
+        # nguyên nhân
+        'init_saturation': init.get('saturation'),
+        'init_sparsity': init.get('sparsity'),
+        'init_dead_relu': init.get('dead_relu'),
+        'init_act_norm': init.get('act_norm'),
+        # đường cong
         'val_acc_curve': hist['val_acc'],
         'train_loss_curve': hist['train_loss'],
-        'init_act_grad_rms': init.get('act_grad_rms'),
-        'act_grad_history': hist.get('act_grad'),
+        'epoch_measured': hist.get('epoch_measured'),
     }
     # Ba khóa dưới đây trả lời phản biện của TA về slope
     if hist.get('slope'):
