@@ -104,9 +104,9 @@ import sys; sys.path.append('src')
 
 - [x] Tái hiện baseline tutorial - train loss 2.3037 (≈ ln 10 = 2.3026), test acc 0.10
 - [x] Tái hiện gradient flow và heatmap layer × epoch
-- [ ] Tối ưu pipeline (1003s → mục tiêu <60s mỗi run)
-- [ ] `metrics.py` đầy đủ
-- [ ] Pha 1 - ablation
+- [x] Tối ưu pipeline (1003s → mục tiêu <60s mỗi run)
+- [x] `metrics.py` đầy đủ
+- [x] Pha 1 - ablation
 - [ ] Pha 2 - depth scaling
 - [ ] Pha 3 - leave-one-out
 
