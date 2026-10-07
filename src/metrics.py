@@ -1,10 +1,15 @@
 """Hệ chỉ số đo Gradient Vanishing.
 
-Nguyên tắc (theo góp ý TA):
-  - Đại lượng chính là ‖∇W‖/‖W‖ vì nó tự chuẩn hóa theo quy mô layer.
+Nguyên tắc (theo góp ý của TA):
+  - Đo CẢ HAI loại gradient:
+      activation gradient δ_l = ∂L/∂h_l  -> phản ánh CƠ CHẾ vanishing
+      weight gradient ∂L/∂W_l = δ_l·a_{l-1}ᵀ -> phản ánh HỆ QUẢ lên việc học
+    Weight gradient nhỏ chưa chắc do vanishing: nó bị lẫn độ lớn của
+    activation đầu vào. Với BatchNorm, ‖∇W‖ còn tỉ lệ nghịch với ‖W‖.
+  - Chuẩn hóa theo số phần tử (RMS thay vì norm) để layer rộng hơn
+    không trông như có gradient lớn hơn.
   - decay_slope chỉ tính trên các layer cùng độ rộng, bỏ layer1 (784->w).
-  - effective_depth báo cáo NHIỀU ngưỡng, không dựa vào một ngưỡng duy nhất.
-  - Không kết luận từ một chỉ số: luôn báo cáo song song nhiều chỉ số.
+  - effective_depth báo cáo NHIỀU ngưỡng, không dựa một ngưỡng duy nhất.
   - Phân biệt sparsity (output=0 mỗi mẫu) với dead-ReLU (neuron=0 mọi mẫu).
 """
 
@@ -14,17 +19,29 @@ import torch
 THRESHOLDS = (0.001, 0.01, 0.05)   # 0.1% / 1% / 5%; 1% là primary
 
 
-# ----------------------------------------------------------------------
-# Gradient
-# ----------------------------------------------------------------------
+# ======================================================================
+# 1. WEIGHT GRADIENT  -  hệ quả lên việc học
+# ======================================================================
 def grad_ratio_per_layer(model):
-    """‖∇W‖/‖W‖ từng layer. Gọi sau backward(), trước step()."""
+    """‖∇W‖/‖W‖ từng layer. Gọi sau backward(), trước step().
+
+    Tự chuẩn hóa theo quy mô layer nên so sánh được giữa các layer
+    kích thước khác nhau. Nhưng vẫn là weight gradient: xem cảnh báo
+    về BatchNorm ở docstring đầu file.
+    """
     out = {}
     for name, lin in model.weight_layers():
         if lin.weight.grad is not None:
             out[name] = (lin.weight.grad.norm()
                          / (lin.weight.norm() + 1e-12)).item()
     return out
+
+
+def grad_rms_per_layer(model):
+    """RMS của ∇W từng layer, chuẩn hóa theo SỐ PHẦN TỬ."""
+    return {name: lin.weight.grad.pow(2).mean().sqrt().item()
+            for name, lin in model.weight_layers()
+            if lin.weight.grad is not None}
 
 
 def grad_abs_mean_per_layer(model):
@@ -34,11 +51,51 @@ def grad_abs_mean_per_layer(model):
             if lin.weight.grad is not None}
 
 
+def effective_update_ratio(model, lr):
+    """lr · ‖∇W‖/‖W‖ - chỉ số thực tế nhất cho biết layer có THẬT SỰ học,
+    không phụ thuộc thang đo của W.
+
+    CHÚ Ý: với Adam công thức này KHÔNG chính xác, vì Adam tự rescale
+    bước cập nhật. Với Adam phải dùng update_ratio_per_layer đo trực tiếp.
+    """
+    return {name: lr * (lin.weight.grad.norm()
+                        / (lin.weight.norm() + 1e-12)).item()
+            for name, lin in model.weight_layers()
+            if lin.weight.grad is not None}
+
+
+# ======================================================================
+# 2. ACTIVATION GRADIENT  -  cơ chế vanishing
+# ======================================================================
+def act_grad_rms(grads):
+    """RMS của δ_l = ∂L/∂h_l từng layer.
+
+    Đây là tín hiệu thực sự được truyền ngược: δ_l = J_{l+1}ᵀ δ_{l+1}.
+    Vanishing nghĩa là tích các Jacobian co dần về 0, và đại lượng này
+    cho thấy điều đó trực tiếp, không bị lẫn độ lớn activation đầu vào.
+    """
+    return {name: g.pow(2).mean().sqrt().item() for name, g in grads.items()}
+
+
+def act_grad_relative(grads):
+    """Tỉ số δ giữa hai layer liền kề, theo chiều backward.
+    Giá trị ~8 nghĩa là tín hiệu co 8 lần khi qua layer đó."""
+    rms = act_grad_rms(grads)
+    names = sorted(rms.keys(), key=lambda s: int(s.replace('layer', '')))
+    out = {}
+    for a, b in zip(names[:-1], names[1:]):
+        out[f'{b}->{a}'] = rms[b] / (rms[a] + 1e-12)
+    return out
+
+
+# ======================================================================
+# 3. SUY GIẢM THEO ĐỘ SÂU
+# ======================================================================
 def decay_slope(ratios, model):
     """Độ dốc hồi quy của log10(ratio) theo chỉ số layer.
 
     Chỉ dùng các layer w->w để loại ảnh hưởng của layer1 (784->w).
-    Gần 0 = gradient được bảo toàn. Dương lớn = suy giảm nhanh về phía input.
+    Gần 0 = gradient được bảo toàn. Dương lớn = suy giảm nhanh về input.
     """
     names = [n for n, _ in model.same_width_layers()] + ['output']
     vals = [ratios[n] for n in names if n in ratios]
@@ -66,8 +123,7 @@ def decay_slope_with_r2(ratios, model):
 
 
 def relative_gradient(ratios, model):
-    """Tỉ số gradient giữa hai layer liền kề, theo chiều backward.
-    Giá trị ~8 nghĩa là gradient co 8 lần khi truyền ngược qua layer đó."""
+    """Tỉ số ‖∇W‖/‖W‖ giữa hai layer liền kề, theo chiều backward."""
     names = [n for n, _ in model.weight_layers()]
     out = {}
     for a, b in zip(names[:-1], names[1:]):
@@ -84,18 +140,19 @@ def effective_depth(ratios, thresholds=THRESHOLDS):
             for t in thresholds}
 
 
-# ----------------------------------------------------------------------
-# Mức cập nhật thực tế  (quan trọng nhất khi phân tích Adam)
-# ----------------------------------------------------------------------
+# ======================================================================
+# 4. MỨC CẬP NHẬT THỰC TẾ
+# ======================================================================
 def snapshot_weights(model):
     return {name: lin.weight.detach().clone()
             for name, lin in model.weight_layers()}
 
 
 def update_ratio_per_layer(model, snapshot):
-    """‖ΔW‖/‖W‖ sau MỘT bước. Layer nào thực sự đang được cập nhật.
+    """‖ΔW‖/‖W‖ sau MỘT bước. Layer nào thực sự được cập nhật.
 
     Gradient nhỏ mà update_ratio vẫn lớn -> optimizer đang bù mức cập nhật.
+    Đây là đại lượng đúng để dùng với Adam.
     """
     out = {}
     for name, lin in model.weight_layers():
@@ -119,27 +176,36 @@ def weight_drift(model, w0):
     return out
 
 
-# ----------------------------------------------------------------------
-# Giải thích nguyên nhân: bão hòa, tính thưa, neuron chết
-# ----------------------------------------------------------------------
+# ======================================================================
+# 5. NGUYÊN NHÂN: bão hòa, tính thưa, neuron chết
+# ======================================================================
 class ActivationRecorder:
-    """Ghi output của các hàm kích hoạt qua forward hook."""
+    """Ghi output và (tùy chọn) gradient của các hàm kích hoạt.
 
-    def __init__(self, model):
+    capture_grad=True gắn backward hook lên tensor output để lấy
+    δ_l = ∂L/∂h_l, đại lượng phản ánh cơ chế vanishing trực tiếp.
+    """
+
+    def __init__(self, model, capture_grad=False):
         self.store = {}
+        self.grads = {}
         self.handles = []
         for i, blk in enumerate(model.blocks):
             self.handles.append(
-                blk.act.register_forward_hook(self._make_hook(f'layer{i + 1}'))
+                blk.act.register_forward_hook(
+                    self._make_hook(f'layer{i + 1}', capture_grad))
             )
 
-    def _make_hook(self, name):
+    def _make_hook(self, name, capture_grad):
         def hook(_m, _inp, out):
             self.store[name] = out.detach()
+            if capture_grad and out.requires_grad:
+                out.register_hook(
+                    lambda g, n=name: self.grads.__setitem__(n, g.detach()))
         return hook
 
     def clear(self):
-        self.store = {}
+        self.store, self.grads = {}, {}
 
     def remove(self):
         for h in self.handles:
@@ -148,7 +214,10 @@ class ActivationRecorder:
 
 def saturation_rate(acts, threshold=0.01):
     """Tỉ lệ neuron sigmoid bão hòa: đạo hàm σ(1-σ) < threshold.
-    Ngưỡng 0.01 ứng với σ ngoài khoảng ~[0.01, 0.99]."""
+    Ngưỡng 0.01 ứng với σ ngoài khoảng ~[0.01, 0.99].
+
+    CHÚ Ý: công thức này chỉ đúng cho sigmoid. Với tanh đạo hàm là 1-a².
+    """
     out = {}
     for name, a in acts.items():
         deriv = a * (1 - a)
@@ -164,7 +233,7 @@ def sparsity_rate(acts):
 def dead_relu_rate(acts):
     """Tỉ lệ NEURON không kích hoạt với BẤT KỲ mẫu nào. Neuron chết thật.
 
-    Khác sparsity: sparsity cao vẫn có thể là tốt (biểu diễn thưa),
+    Khác sparsity: sparsity cao vẫn có thể tốt (biểu diễn thưa),
     còn dead-ReLU cao là mất hẳn capacity.
     """
     out = {}
@@ -172,3 +241,10 @@ def dead_relu_rate(acts):
         never_active = (a.abs().sum(dim=0) == 0)   # cộng theo chiều batch
         out[name] = never_active.float().mean().item()
     return out
+
+
+def act_norm_per_layer(acts):
+    """RMS của activation từng layer. Kiểm tra xem tín hiệu có phình lên
+    theo độ sâu không - đáng chú ý với residual + sigmoid, vì F(x) luôn
+    dương nên x cộng dồn đơn điệu."""
+    return {name: a.pow(2).mean().sqrt().item() for name, a in acts.items()}
