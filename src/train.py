@@ -1,4 +1,11 @@
-"""Nạp dữ liệu lên GPU + chạy một thí nghiệm."""
+"""Nạp dữ liệu lên GPU + chạy một thí nghiệm.
+
+Khác tutorial:
+  - toàn bộ dataset nằm sẵn trên GPU, không dùng DataLoader
+  - batch_size 256 (tutorial không nêu giá trị)
+  - 50 epoch + early stopping thay vì 100 epoch cố định
+  - đo CẢ activation gradient và weight gradient (theo hướng dẫn TA)
+"""
 
 import random
 import time
@@ -10,12 +17,20 @@ import torchvision.transforms as transforms
 from torchvision.datasets import FashionMNIST
 
 from model import build_mlp
-from metrics import (grad_ratio_per_layer, grad_abs_mean_per_layer,
-                     decay_slope, decay_slope_with_r2, weight_drift,
-                     relative_gradient, effective_depth,
-                     snapshot_weights, update_ratio_per_layer,
-                     ActivationRecorder, saturation_rate,
-                     sparsity_rate, dead_relu_rate)
+from metrics import (
+    # weight gradient
+    grad_ratio_per_layer, grad_rms_per_layer, grad_abs_mean_per_layer,
+    effective_update_ratio,
+    # activation gradient
+    act_grad_rms, act_grad_relative,
+    # suy giảm theo độ sâu
+    decay_slope, decay_slope_with_r2, relative_gradient, effective_depth,
+    # mức cập nhật
+    snapshot_weights, update_ratio_per_layer, weight_drift,
+    # nguyên nhân
+    ActivationRecorder, saturation_rate, sparsity_rate, dead_relu_rate,
+    act_norm_per_layer,
+)
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 _CACHE = {}
@@ -59,32 +74,46 @@ def load_data(train_ratio=0.9, split_seed=42):
 
 @torch.no_grad()
 def evaluate(model, X, y, criterion, bs=2048):
+    """Cộng dồn dưới dạng tensor, chỉ .item() một lần ở cuối
+    để tránh đồng bộ GPU-CPU mỗi batch."""
     model.eval()
-    loss_sum, correct, steps = 0.0, 0, 0
+    loss_sum = torch.zeros((), device=X.device)
+    correct = torch.zeros((), device=X.device)
+    steps = 0
     for i in range(0, len(X), bs):
         out = model(X[i:i + bs])
-        loss_sum += criterion(out, y[i:i + bs]).item()
-        correct += (out.argmax(1) == y[i:i + bs]).sum().item()
+        loss_sum += criterion(out, y[i:i + bs])
+        correct += (out.argmax(1) == y[i:i + bs]).sum()
         steps += 1
-    return loss_sum / steps, correct / len(X)
+    return (loss_sum / steps).item(), (correct / len(X)).item()
 
 
-def measure_at_init(model, X, y, criterion, bs):
-    """Đo trước bước cập nhật đầu tiên. KHÔNG phụ thuộc learning rate."""
+def measure_at_init(model, X, y, criterion, bs, lr):
+    """Đo trước bước cập nhật đầu tiên. KHÔNG phụ thuộc learning rate
+    (trừ eff_update, vốn nhân lr vào một cách tường minh)."""
     model.train()
-    rec = ActivationRecorder(model)
+    rec = ActivationRecorder(model, capture_grad=True)
     criterion(model(X[:bs]), y[:bs]).backward()
 
     ratios = grad_ratio_per_layer(model)
     result = {
+        # --- cơ chế: activation gradient ---
+        'act_grad_rms': act_grad_rms(rec.grads),
+        'act_grad_relative': act_grad_relative(rec.grads),
+        # --- hệ quả: weight gradient ---
         'grad_ratio': ratios,
+        'grad_rms': grad_rms_per_layer(model),
         'grad_abs': grad_abs_mean_per_layer(model),
+        'eff_update': effective_update_ratio(model, lr),
+        # --- suy giảm theo độ sâu ---
         'decay_slope': decay_slope(ratios, model),
         'relative_gradient': relative_gradient(ratios, model),
         'effective_depth': effective_depth(ratios),
+        # --- nguyên nhân ---
         'saturation': saturation_rate(rec.store),
         'sparsity': sparsity_rate(rec.store),
         'dead_relu': dead_relu_rate(rec.store),
+        'act_norm': act_norm_per_layer(rec.store),
     }
     model.zero_grad()
     rec.remove()
@@ -102,8 +131,11 @@ def run_experiment(cfg, verbose=True):
         model.parameters(), lr=cfg.lr)
 
     hist = {'train_loss': [], 'val_loss': [], 'val_acc': [],
-            'grad_ratio': [], 'update_ratio': [], 'slope': [], 'r2': [], 'drift': []}
-    init = measure_at_init(model, X_tr, y_tr, criterion, cfg.batch_size)
+            'grad_ratio': [], 'act_grad': [], 'update_ratio': [],
+            'slope': [], 'r2': [], 'drift': []}
+
+    init = measure_at_init(model, X_tr, y_tr, criterion,
+                           cfg.batch_size, cfg.lr)
 
     n = len(X_tr)
     best_val, wait, stopped_at = float('inf'), 0, cfg.epochs
@@ -112,31 +144,41 @@ def run_experiment(cfg, verbose=True):
     for epoch in range(cfg.epochs):
         model.train()
         perm = torch.randperm(n, device=device)
-        loss_sum, steps = 0.0, 0
-        ep_grad, ep_update = None, None
+        loss_sum = torch.zeros((), device=device)
+        n_steps = 0
+        ep_grad = ep_update = ep_act = None
 
         for step, i in enumerate(range(0, n, cfg.batch_size)):
             idx = perm[i:i + cfg.batch_size]
             opt.zero_grad()
-            loss = criterion(model(X_tr[idx]), y_tr[idx])
-            loss.backward()
 
-            if step == 0:                       # chỉ đo batch đầu mỗi epoch
+            if step == 0:
+                # batch đầu mỗi epoch: bật recorder để lấy activation gradient
+                rec = ActivationRecorder(model, capture_grad=True)
+                out = model(X_tr[idx])
+                loss = criterion(out, y_tr[idx])
+                loss.backward()
                 ep_grad = grad_ratio_per_layer(model)
+                ep_act = act_grad_rms(rec.grads)
+                rec.remove()
                 snap = snapshot_weights(model)
                 opt.step()
                 ep_update = update_ratio_per_layer(model, snap)
             else:
+                out = model(X_tr[idx])
+                loss = criterion(out, y_tr[idx])
+                loss.backward()
                 opt.step()
 
-            loss_sum += loss.item()
-            steps += 1
+            loss_sum += loss.detach()
+            n_steps += 1
 
         val_loss, val_acc = evaluate(model, X_va, y_va, criterion)
-        hist['train_loss'].append(loss_sum / steps)
+        hist['train_loss'].append((loss_sum / n_steps).item())
         hist['val_loss'].append(val_loss)
         hist['val_acc'].append(val_acc)
         hist['grad_ratio'].append(ep_grad)
+        hist['act_grad'].append(ep_act)
         hist['update_ratio'].append(ep_update)
 
         s, r2 = decay_slope_with_r2(ep_grad, model)
@@ -154,6 +196,7 @@ def run_experiment(cfg, verbose=True):
 
     _, test_acc = evaluate(model, X_te, y_te, criterion)
     final_ratio = hist['grad_ratio'][-1]
+    last_layer = f'layer{cfg.depth}'
 
     result = {
         **cfg.to_dict(),
@@ -162,16 +205,27 @@ def run_experiment(cfg, verbose=True):
         'final_train_loss': hist['train_loss'][-1],
         'stopped_at': stopped_at,
         'runtime_s': time.time() - t0,
+        # weight gradient
         'init_decay_slope': init['decay_slope'],
         'final_decay_slope': decay_slope(final_ratio, model),
-        'init_grad_ratio_L1': init['grad_ratio']['layer1'],
-        'final_grad_ratio_L1': final_ratio['layer1'],
-        'final_update_ratio_L1': hist['update_ratio'][-1]['layer1'],
-        'final_update_ratio_out': hist['update_ratio'][-1]['output'],
         'final_r2': hist['r2'][-1],
-        'drift_L1': hist['drift'][-1]['layer1'],
-        'drift_out': hist['drift'][-1]['output'],
         'slope_change': hist['slope'][-1] - hist['slope'][0],
+        'init_grad_ratio_L1': init['grad_ratio'].get('layer1'),
+        'final_grad_ratio_L1': final_ratio.get('layer1'),
+        # activation gradient - CƠ CHẾ
+        'init_act_grad_L1': init['act_grad_rms'].get('layer1'),
+        'init_act_grad_last': init['act_grad_rms'].get(last_layer),
+        'final_act_grad_L1': (hist['act_grad'][-1] or {}).get('layer1'),
+        # mức cập nhật
+        'init_eff_update_L1': init['eff_update'].get('layer1'),
+        'final_update_ratio_L1': hist['update_ratio'][-1].get('layer1'),
+        'final_update_ratio_out': hist['update_ratio'][-1].get('output'),
+        'drift_L1': hist['drift'][-1].get('layer1'),
+        'drift_out': hist['drift'][-1].get('output'),
+        # nguyên nhân
+        'init_saturation_L1': init['saturation'].get('layer1'),
+        'init_dead_relu_L1': init['dead_relu'].get('layer1'),
+        'init_sparsity_L1': init['sparsity'].get('layer1'),
     }
     for t, v in init['effective_depth'].items():
         result[f'init_eff_depth_{t}'] = v
@@ -180,9 +234,10 @@ def run_experiment(cfg, verbose=True):
 
     if verbose:
         print(f"[{cfg.name} | seed {cfg.seed}] "
-              f"test_acc {test_acc:.4f} | loss {result['final_train_loss']:.4f} | "
-              f"slope {result['final_decay_slope']:.3f} | "
+              f"acc {test_acc:.4f} | loss {result['final_train_loss']:.4f} | "
+              f"slope {result['final_decay_slope']:.3f} "
+              f"(R2 {result['final_r2']:.3f}) | "
+              f"driftL1 {result['drift_L1']:.2e} | "
               f"stop@{stopped_at} | {result['runtime_s']:.1f}s")
 
     return result, hist, init
-
