@@ -132,7 +132,7 @@ def run_experiment(cfg, verbose=True):
 
     hist = {'train_loss': [], 'val_loss': [], 'val_acc': [],
             'grad_ratio': [], 'act_grad': [], 'update_ratio': [],
-            'slope': [], 'r2': [], 'drift': []}
+            'slope': [], 'r2': [], 'drift': [], 'epoch_measured': []}
 
     init = measure_at_init(model, X_tr, y_tr, criterion,
                            cfg.batch_size, cfg.lr)
@@ -148,12 +148,16 @@ def run_experiment(cfg, verbose=True):
         n_steps = 0
         ep_grad = ep_update = ep_act = None
 
+        # Chỉ đo ở epoch đầu, epoch cuối, và mỗi measure_every epoch.
+        # Mỗi lần đo tốn ~40 lần đồng bộ GPU-CPU nên đo mỗi epoch rất chậm.
+        do_measure = (epoch % cfg.measure_every == 0
+                      or epoch == cfg.epochs - 1)
+
         for step, i in enumerate(range(0, n, cfg.batch_size)):
             idx = perm[i:i + cfg.batch_size]
             opt.zero_grad()
 
-            if step == 0:
-                # batch đầu mỗi epoch: bật recorder để lấy activation gradient
+            if step == 0 and do_measure:
                 rec = ActivationRecorder(model, capture_grad=True)
                 out = model(X_tr[idx])
                 loss = criterion(out, y_tr[idx])
@@ -177,14 +181,16 @@ def run_experiment(cfg, verbose=True):
         hist['train_loss'].append((loss_sum / n_steps).item())
         hist['val_loss'].append(val_loss)
         hist['val_acc'].append(val_acc)
-        hist['grad_ratio'].append(ep_grad)
-        hist['act_grad'].append(ep_act)
-        hist['update_ratio'].append(ep_update)
+        hist['epoch_measured'].append(epoch if ep_grad is not None else None)
 
-        s, r2 = decay_slope_with_r2(ep_grad, model)
-        hist['slope'].append(s)
-        hist['r2'].append(r2)
-        hist['drift'].append(weight_drift(model, w0))
+        if ep_grad is not None:
+            hist['grad_ratio'].append(ep_grad)
+            hist['act_grad'].append(ep_act)
+            hist['update_ratio'].append(ep_update)
+            s, r2 = decay_slope_with_r2(ep_grad, model)
+            hist['slope'].append(s)
+            hist['r2'].append(r2)
+            hist['drift'].append(weight_drift(model, w0))
 
         if val_loss < best_val - cfg.min_delta:
             best_val, wait = val_loss, 0
@@ -192,6 +198,22 @@ def run_experiment(cfg, verbose=True):
             wait += 1
             if wait >= cfg.patience:
                 stopped_at = epoch + 1
+                if ep_grad is None:      # epoch này chưa đo -> đo bù
+                    opt.zero_grad()
+                    rec = ActivationRecorder(model, capture_grad=True)
+                    criterion(model(X_tr[:cfg.batch_size]),
+                              y_tr[:cfg.batch_size]).backward()
+                    ep_grad = grad_ratio_per_layer(model)
+                    hist['grad_ratio'].append(ep_grad)
+                    hist['act_grad'].append(act_grad_rms(rec.grads))
+                    hist['update_ratio'].append(
+                        hist['update_ratio'][-1] if hist['update_ratio'] else {})
+                    s, r2 = decay_slope_with_r2(ep_grad, model)
+                    hist['slope'].append(s)
+                    hist['r2'].append(r2)
+                    hist['drift'].append(weight_drift(model, w0))
+                    rec.remove()
+                    model.zero_grad()
                 break
 
     _, test_acc = evaluate(model, X_te, y_te, criterion)
