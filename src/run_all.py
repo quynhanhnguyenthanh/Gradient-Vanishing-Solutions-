@@ -22,6 +22,7 @@ from train import run_experiment
 RESULTS_DIR = 'results'
 RAW_DIR = os.path.join(RESULTS_DIR, 'raw')
 SUMMARY = os.path.join(RESULTS_DIR, 'summary.csv')
+LR_SWEEP = os.path.join(RESULTS_DIR, 'lr_sweep.csv')
 
 
 # ----------------------------------------------------------------------
@@ -29,7 +30,7 @@ SUMMARY = os.path.join(RESULTS_DIR, 'summary.csv')
 # ----------------------------------------------------------------------
 BASELINE = Config(name='baseline')
 
-# 5 giải pháp, mỗi cái đại diện một cơ chế khác nhau
+# 5 giải pháp, mỗi cái đại diện một cơ chế khác nhau (theo góp ý TA)
 SOLUTIONS = {
     'relu':     dict(activation='relu'),
     'he':       dict(init='he'),
@@ -52,8 +53,9 @@ def phase1_configs():
 
 
 def phase2_configs(depths=(3, 7, 15, 25)):
-    """Khảo sát theo độ sâu. Vanishing là hiện tượng theo độ sâu nên
-    đây là pha gắn chặt nhất với câu hỏi nghiên cứu."""
+    """Khảo sát theo độ sâu. Vanishing là hiện tượng theo độ sâu nên đây là
+    pha gắn chặt nhất với câu hỏi nghiên cứu. TA cũng chỉ ra chênh lệch slope
+    nhỏ tạo khác biệt lớn khi nhân qua nhiều layer."""
     out = []
     for cfg in phase1_configs():
         for d in depths:
@@ -84,6 +86,11 @@ def phase3_configs():
 # Tune learning rate: cùng ngân sách cho mọi cấu hình
 # ----------------------------------------------------------------------
 def tune_lr(cfg, tune_epochs=20):
+    """Thử cùng một lưới 4 giá trị, chọn theo val_acc, dùng 1 seed.
+
+    Không cố định lr chung vì thang lr của SGD và Adam khác hẳn nhau.
+    Không tune tùy ý vì cấu hình được tune kỹ hơn sẽ có lợi thế.
+    """
     grid = LR_GRID[cfg.optimizer]
     best_lr, best_acc, sweep = grid[0], -1.0, []
 
@@ -97,9 +104,9 @@ def tune_lr(cfg, tune_epochs=20):
             best_lr, best_acc = lr, res['val_acc']
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    path = os.path.join(RESULTS_DIR, 'lr_sweep.csv')
-    pd.DataFrame(sweep).to_csv(path, mode='a',
-                               header=not os.path.exists(path), index=False)
+    header = (not os.path.exists(LR_SWEEP)) or os.path.getsize(LR_SWEEP) == 0
+    pd.DataFrame(sweep).to_csv(LR_SWEEP, mode='a', header=header, index=False)
+
     print(f"    -> chọn lr={best_lr:g}")
     return best_lr
 
@@ -108,12 +115,15 @@ def tune_lr(cfg, tune_epochs=20):
 # Lưu kết quả
 # ----------------------------------------------------------------------
 def load_done():
-    """Trả tập (name, seed) đã chạy xong, để resume."""
+    """Trả tập (name, seed) đã chạy xong, để resume.
+
+    Phòng ba trường hợp: file chưa có, file rỗng, file thiếu cột.
+    """
     if not os.path.exists(SUMMARY) or os.path.getsize(SUMMARY) == 0:
         return set()
     try:
         df = pd.read_csv(SUMMARY)
-    except pd.errors.EmptyDataError:
+    except Exception:
         return set()
     if 'name' not in df.columns or 'seed' not in df.columns:
         return set()
@@ -122,28 +132,37 @@ def load_done():
 
 def append_row(row):
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    df = pd.DataFrame([row])
-    df.to_csv(SUMMARY, mode='a', header=not os.path.exists(SUMMARY), index=False)
+    header = (not os.path.exists(SUMMARY)) or os.path.getsize(SUMMARY) == 0
+    pd.DataFrame([row]).to_csv(SUMMARY, mode='a', header=header, index=False)
 
 
 def save_raw(cfg, hist, init):
-    """Lưu đường gradient theo layer để vẽ hình sau, không phải chạy lại."""
+    """Lưu đường gradient theo layer và theo epoch để vẽ hình sau,
+    không phải chạy lại thí nghiệm."""
     os.makedirs(RAW_DIR, exist_ok=True)
     path = os.path.join(RAW_DIR, f'{cfg.name}_s{cfg.seed}.json')
+    data = {
+        'config': cfg.to_dict(),
+        'init_grad_ratio': init['grad_ratio'],
+        'init_saturation': init.get('saturation'),
+        'init_sparsity': init.get('sparsity'),
+        'init_dead_relu': init.get('dead_relu'),
+        'init_relative_gradient': init.get('relative_gradient'),
+        'final_grad_ratio': hist['grad_ratio'][-1],
+        'final_update_ratio': hist['update_ratio'][-1],
+        'val_acc_curve': hist['val_acc'],
+        'train_loss_curve': hist['train_loss'],
+    }
+    # Ba khóa dưới đây trả lời phản biện của TA về slope
+    if hist.get('slope'):
+        data['slope_per_epoch'] = hist['slope']
+    if hist.get('r2'):
+        data['r2_per_epoch'] = hist['r2']
+    if hist.get('drift'):
+        data['drift_final'] = hist['drift'][-1]
+
     with open(path, 'w') as f:
-        json.dump({
-            'config': cfg.to_dict(),
-            'init_grad_ratio': init['grad_ratio'],
-            'init_saturation': init['saturation'],
-            'init_dead_relu': init['dead_relu'],
-            'final_grad_ratio': hist['grad_ratio'][-1],
-            'final_update_ratio': hist['update_ratio'][-1],
-            'val_acc_curve': hist['val_acc'],
-            'train_loss_curve': hist['train_loss'],
-            'grad_ratio_history': hist['grad_ratio'],
-            'update_ratio_history': hist['update_ratio'],
-            'init_relative_gradient': init['relative_gradient'],
-        }, f)
+        json.dump(data, f)
 
 
 # ----------------------------------------------------------------------
@@ -171,21 +190,38 @@ def run_phase(configs, phase_name, tune=True):
 
 
 def summarize():
-    if not os.path.exists(SUMMARY):
+    if not os.path.exists(SUMMARY) or os.path.getsize(SUMMARY) == 0:
         print('Chưa có kết quả.')
         return
-    df = pd.read_csv(SUMMARY)
-    agg = df.groupby('name').agg(
-        test_acc_mean=('test_acc', 'mean'),
-        test_acc_std=('test_acc', 'std'),
-        slope=('init_decay_slope', 'mean'),
-        eff_depth=('init_eff_depth_0.01', 'mean'),
-        n=('seed', 'count'),
-    ).round(4)
+    try:
+        df = pd.read_csv(SUMMARY)
+    except Exception as e:
+        print(f'Không đọc được {SUMMARY}: {e}')
+        return
+    if 'name' not in df.columns:
+        print(f'summary.csv thiếu cột "name". Cột hiện có: {list(df.columns)}')
+        print('File có thể bị hỏng - xóa results/ và chạy lại.')
+        return
+
+    wanted = {
+        'test_acc': ['mean', 'std'],
+        'init_decay_slope': 'mean',
+        'final_r2': 'mean',
+        'drift_L1': 'mean',
+        'drift_out': 'mean',
+        'init_eff_depth_0.01': 'mean',
+        'seed': 'count',
+    }
+    wanted = {k: v for k, v in wanted.items() if k in df.columns}
+    agg = df.groupby('name').agg(wanted).round(5)
+
     print('\n' + agg.to_string())
-    print('\nLưu ý: chỉ kết luận cấu hình A tốt hơn B khi chênh lệch '
-          'lớn hơn rõ rệt so với std. Nếu nằm trong std -> '
-          '"chưa phân biệt được".')
+    print('\nLưu ý: chỉ kết luận cấu hình A tốt hơn B khi chênh lệch lớn hơn '
+          'rõ rệt so với std.')
+    print('Nếu nằm trong khoảng std -> ghi "chưa phân biệt được".')
+    if 'drift_L1' in df.columns:
+        print('drift_L1 ~ 0 nghĩa là layer đầu gần như không học. Khi đó slope '
+              'không đổi KHÔNG phải bằng chứng cho "vanishing ổn định".')
 
 
 if __name__ == '__main__':
