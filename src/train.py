@@ -11,9 +11,11 @@ from torchvision.datasets import FashionMNIST
 
 from model import build_mlp
 from metrics import (grad_ratio_per_layer, grad_abs_mean_per_layer,
-                     decay_slope, relative_gradient, effective_depth,
+                     decay_slope, decay_slope_with_r2, weight_drift,
+                     relative_gradient, effective_depth,
                      snapshot_weights, update_ratio_per_layer,
-                     ActivationRecorder, saturation_rate, dead_relu_rate)
+                     ActivationRecorder, saturation_rate,
+                     sparsity_rate, dead_relu_rate)
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 _CACHE = {}
@@ -81,6 +83,7 @@ def measure_at_init(model, X, y, criterion, bs):
         'relative_gradient': relative_gradient(ratios, model),
         'effective_depth': effective_depth(ratios),
         'saturation': saturation_rate(rec.store),
+        'sparsity': sparsity_rate(rec.store),
         'dead_relu': dead_relu_rate(rec.store),
     }
     model.zero_grad()
@@ -93,12 +96,13 @@ def run_experiment(cfg, verbose=True):
     X_tr, y_tr, X_va, y_va, X_te, y_te = load_data()
 
     model = build_mlp(cfg).to(device)
+    w0 = {n: l.weight.detach().clone() for n, l in model.weight_layers()}
     criterion = nn.CrossEntropyLoss()
     opt = (optim.Adam if cfg.optimizer == 'adam' else optim.SGD)(
         model.parameters(), lr=cfg.lr)
 
     hist = {'train_loss': [], 'val_loss': [], 'val_acc': [],
-            'grad_ratio': [], 'update_ratio': []}
+            'grad_ratio': [], 'update_ratio': [], 'slope': [], 'r2': [], 'drift': []}
     init = measure_at_init(model, X_tr, y_tr, criterion, cfg.batch_size)
 
     n = len(X_tr)
@@ -135,6 +139,11 @@ def run_experiment(cfg, verbose=True):
         hist['grad_ratio'].append(ep_grad)
         hist['update_ratio'].append(ep_update)
 
+        s, r2 = decay_slope_with_r2(ep_grad, model)
+        hist['slope'].append(s)
+        hist['r2'].append(r2)
+        hist['drift'].append(weight_drift(model, w0))
+
         if val_loss < best_val - cfg.min_delta:
             best_val, wait = val_loss, 0
         else:
@@ -159,6 +168,10 @@ def run_experiment(cfg, verbose=True):
         'final_grad_ratio_L1': final_ratio['layer1'],
         'final_update_ratio_L1': hist['update_ratio'][-1]['layer1'],
         'final_update_ratio_out': hist['update_ratio'][-1]['output'],
+        'final_r2': hist['r2'][-1],
+        'drift_L1': hist['drift'][-1]['layer1'],
+        'drift_out': hist['drift'][-1]['output'],
+        'slope_change': hist['slope'][-1] - hist['slope'][0],
     }
     for t, v in init['effective_depth'].items():
         result[f'init_eff_depth_{t}'] = v
