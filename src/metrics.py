@@ -33,19 +33,31 @@ def grad_abs_mean_per_layer(model):
             if lin.weight.grad is not None}
 
 
-def decay_slope(ratios, model):
-    """Độ dốc hồi quy của log10(ratio) theo chỉ số layer.
-
-    Chỉ dùng các layer w->w. Gần 0 = gradient được bảo toàn.
-    Giá trị âm lớn = suy giảm nhanh theo cấp số nhân.
-    """
+def decay_slope_with_r2(ratios, model):
+    """Trả (slope, r2). R2 thấp nghĩa là suy giảm KHÔNG theo cấp số nhân,
+    lúc đó slope đơn lẻ mất ý nghĩa và phải xem toàn bộ profile."""
     names = [n for n, _ in model.same_width_layers()] + ['output']
     vals = [ratios[n] for n in names if n in ratios]
     if len(vals) < 3:
-        return float('nan')
-    logv = np.log10(np.array(vals) + 1e-12)
-    # trục x: 0 = layer nông nhất trong nhóm, tăng dần về output
-    return float(np.polyfit(np.arange(len(logv)), logv, 1)[0])
+        return float('nan'), float('nan')
+    y = np.log10(np.array(vals) + 1e-12)
+    x = np.arange(len(y))
+    slope, intercept = np.polyfit(x, y, 1)
+    pred = slope * x + intercept
+    ss_res = ((y - pred) ** 2).sum()
+    ss_tot = ((y - y.mean()) ** 2).sum()
+    r2 = 1 - ss_res / (ss_tot + 1e-12)
+    return float(slope), float(r2)
+
+
+def weight_drift(model, w0):
+    """‖W_t − W_0‖/‖W_0‖ từng layer. Layer nào thực sự đã dịch chuyển
+    khỏi điểm khởi tạo. Phân biệt 'vanishing ổn định' với 'không học gì'."""
+    out = {}
+    for name, lin in model.weight_layers():
+        out[name] = ((lin.weight.detach() - w0[name]).norm()
+                     / (w0[name].norm() + 1e-12)).item()
+    return out
 
 def relative_gradient(ratios, model):
     """Tỉ số gradient giữa layer liền kề. Cho biết mỗi layer làm
@@ -124,7 +136,15 @@ def saturation_rate(acts, threshold=0.01):
         out[name] = (deriv < threshold).float().mean().item()
     return out
 
+def sparsity_rate(acts):
+    """Tỉ lệ output bằng 0, tính trên mỗi mẫu. Tính thưa có ích."""
+    return {n: (a == 0).float().mean().item() for n, a in acts.items()}
+
 
 def dead_relu_rate(acts):
-    """Tỉ lệ neuron ReLU có output = 0 trên toàn batch."""
-    return {name: (a == 0).float().mean().item() for name, a in acts.items()}
+    """Tỉ lệ NEURON không kích hoạt với BẤT KỲ mẫu nào. Neuron chết thật."""
+    out = {}
+    for n, a in acts.items():
+        never_active = (a.abs().sum(dim=0) == 0)   # cộng theo chiều batch
+        out[n] = never_active.float().mean().item()
+    return out
