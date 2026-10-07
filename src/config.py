@@ -1,3 +1,5 @@
+"""Cấu hình một thí nghiệm. Một Config = một dòng trong summary.csv."""
+
 from dataclasses import dataclass, asdict
 
 
@@ -21,6 +23,11 @@ class Config:
     patience: int = 15                # early stopping; đặt rộng vì plateau
     min_delta: float = 1e-4
 
+    # đo chỉ số: mỗi `measure_every` epoch thay vì mỗi epoch.
+    # Mỗi lần đo tốn ~40 lần đồng bộ GPU-CPU (.item()), nên đo mỗi epoch
+    # làm runtime tăng ~3 lần. 10 điểm đo đủ để thấy xu hướng của slope.
+    measure_every: int = 5
+
     seed: int = 42
 
     def to_dict(self):
@@ -35,4 +42,3 @@ LR_GRID = {
     'sgd':  [1e-3, 1e-2, 1e-1, 5e-1],
     'adam': [1e-5, 1e-4, 1e-3, 1e-2],
 }
-
