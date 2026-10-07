@@ -11,6 +11,7 @@ chạy lại sẽ bỏ qua các run đã xong.
 
 import argparse
 import json
+import math
 import os
 from dataclasses import replace
 
@@ -34,6 +35,10 @@ BASELINE = Config(name='baseline')
 SOLUTIONS = {
     'relu':     dict(activation='relu'),
     'he':       dict(init='he'),
+    # He init được suy ra VỚI GIẢ ĐỊNH ReLU, nên sigmoid+He và relu+N(0,0.05)
+    # đều là cấu hình không có cơ sở lý thuyết. Giữ cả ba để thấy rõ hai biến
+    # này không độc lập - đó chính là luận điểm của He et al. 2015.
+    'relu_he':  dict(activation='relu', init='he'),
     'bn':       dict(norm='batchnorm'),
     'residual': dict(residual=True),
     'adam':     dict(optimizer='adam'),
@@ -98,14 +103,32 @@ def tune_lr(cfg, tune_epochs=20):
         trial = replace(cfg, lr=lr, epochs=tune_epochs,
                         patience=tune_epochs, seed=SEEDS[0])
         res, _, _ = run_experiment(trial, verbose=False)
-        print(f"    lr={lr:<8g} val_acc={res['val_acc']:.4f}")
-        sweep.append({'name': cfg.name, 'lr': lr, 'val_acc': res['val_acc']})
-        if res['val_acc'] > best_acc:
-            best_lr, best_acc = lr, res['val_acc']
+        acc, loss = res['val_acc'], res['final_train_loss']
+
+        # Một lr làm tràn số (loss/acc = NaN hoặc inf) KHÔNG BAO GIỜ được chọn.
+        # Trước khi có kiểm tra này, +relu bị chọn lr=0.5 và loss thành NaN.
+        diverged = (not math.isfinite(loss)) or (not math.isfinite(acc))
+        flag = '  [DIVERGED]' if diverged else ''
+        print(f"    lr={lr:<8g} val_acc={acc:.4f} loss={loss:.4f}{flag}")
+        sweep.append({'name': cfg.name, 'lr': lr, 'val_acc': acc,
+                      'final_train_loss': loss, 'diverged': diverged})
+
+        if diverged:
+            continue
+        # Ngưỡng 1e-4: khi hai lr cho kết quả gần bằng nhau thì giữ lr NHỎ hơn
+        # (grid đi từ nhỏ đến lớn), vì lr nhỏ an toàn hơn về mặt ổn định.
+        if acc > best_acc + 1e-4:
+            best_lr, best_acc = lr, acc
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
     header = (not os.path.exists(LR_SWEEP)) or os.path.getsize(LR_SWEEP) == 0
     pd.DataFrame(sweep).to_csv(LR_SWEEP, mode='a', header=header, index=False)
+
+    if best_acc < 0.15:          # ~mức đoán ngẫu nhiên trên 10 lớp
+        print(f"    !! CẢNH BÁO: không lr nào giúp {cfg.name} học được "
+              f"(best val_acc={best_acc:.4f}).")
+        print(f"       Cấu hình này có thể không train được vì lý do khác "
+              f"ngoài learning rate - xem lại init/activation.")
 
     print(f"    -> chọn lr={best_lr:g}")
     return best_lr
@@ -227,6 +250,13 @@ def summarize():
     agg = df.groupby('name').agg(wanted).round(5)
 
     print('\n' + agg.to_string())
+    bad = df[~df['final_train_loss'].apply(
+        lambda v: isinstance(v, (int, float)) and v == v)]['name'].unique() \
+        if 'final_train_loss' in df.columns else []
+    if len(bad):
+        print(f'\n!! Các cấu hình có loss = NaN (tràn số): {list(bad)}')
+        print('   Kết quả của chúng KHÔNG dùng để so sánh được.')
+
     print('\nLưu ý: chỉ kết luận cấu hình A tốt hơn B khi chênh lệch lớn hơn '
           'rõ rệt so với std.')
     print('Nếu nằm trong khoảng std -> ghi "chưa phân biệt được".')
