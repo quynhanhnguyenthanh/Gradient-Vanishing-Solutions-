@@ -152,6 +152,8 @@ def save_raw(cfg, hist, init):
         'final_update_ratio': hist['update_ratio'][-1],
         'val_acc_curve': hist['val_acc'],
         'train_loss_curve': hist['train_loss'],
+        'init_act_grad_rms': init.get('act_grad_rms'),
+        'act_grad_history': hist.get('act_grad'),
     }
     # Ba khóa dưới đây trả lời phản biện của TA về slope
     if hist.get('slope'):
