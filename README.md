@@ -107,8 +107,9 @@ import sys; sys.path.append('src')
 - [x] Tối ưu pipeline (1003s → mục tiêu <60s mỗi run)
 - [x] `metrics.py` đầy đủ
 - [x] Pha 1 - ablation
-- [ ] Pha 2 - depth scaling
-- [ ] Pha 3 - leave-one-out
+- [x] Pha 2 - depth scaling
+- [x] Pha 3 - leave-one-out
+- [ ] Hoàn thành báo cáo
 
 ---
 
