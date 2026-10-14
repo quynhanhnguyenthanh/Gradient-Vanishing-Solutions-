@@ -109,7 +109,7 @@ import sys; sys.path.append('src')
 - [x] Pha 1 - ablation
 - [x] Pha 2 - depth scaling
 - [x] Pha 3 - leave-one-out
-- [ ] Hoàn thành báo cáo
+- [x] Hoàn thành báo cáo
 
 ---
 
